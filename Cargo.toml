@@ -1,6 +1,6 @@
 [package]
 name = "my-vnc"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -23,8 +23,17 @@ windows = { version = "0.57.0", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
-    "Win32_UI_HiDpi"
+    "Win32_UI_HiDpi",
+    "Win32",
+    "Win32_UI_Input_KeyboardAndMouse",
 ] }
 
 clap = { version = "4.5.7", features = ["derive", "env"] }
 lazy_static = "1.4.0"
+xkeysym = "0.2.1"
+win_key_codes = "0.1.2"
+clipboard-win = "5.3.1"
+
+[profile.release]
+lto = false
+opt-level = 2

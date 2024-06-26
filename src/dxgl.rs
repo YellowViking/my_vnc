@@ -1,18 +1,15 @@
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::DerefMut;
-use std::sync::{Arc, LockResult, Mutex, RwLock};
-use std::sync::mpsc::{channel, Receiver, Sender, sync_channel, SyncSender};
-use std::time::Instant;
-use anyhow::anyhow;
-use chrono::Duration;
+use std::sync::{Arc, Mutex, RwLock};
+
 use lazy_static::lazy_static;
-use log::{debug, error, info, log, trace};
+use log::{debug, error, info};
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device4, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGISurface1;
 use windows::Win32::Graphics::Gdi::HDC;
-use win_desktop_duplication::{co_init, DesktopDuplicationApi, set_process_dpi_awareness};
+
+use win_desktop_duplication::{co_init, DesktopDuplicationApi, DuplicationApiOptions, set_process_dpi_awareness};
 use win_desktop_duplication::devices::AdapterFactory;
 use win_desktop_duplication::outputs::Display;
 use win_desktop_duplication::tex_reader::TextureReader;
@@ -62,7 +59,7 @@ impl DisplayDuplWrapper {
         })
     }
 
-    pub fn draw_to_texture(&self, draw_action: impl Fn(HDC) -> (anyhow::Result<()>)) -> anyhow::Result<()> {
+    pub fn draw_to_texture(&self, draw_action: impl Fn(HDC) -> anyhow::Result<()>) -> anyhow::Result<()> {
         unsafe {
             let surface: IDXGISurface1 = self.id3d11texture2d.cast()?;
             let hdc: HDC;
@@ -74,7 +71,7 @@ impl DisplayDuplWrapper {
     }
 
     pub fn copy_to_vec(&self) -> anyhow::Result<Vec<u8>> {
-        get_display_dupl(self.display, |display_dupl| -> anyhow::Result<(Vec<u8>)> {
+        get_display_dupl(self.display, |display_dupl| -> anyhow::Result<Vec<u8>> {
             let mut vec = Vec::new();
             let (dev, ctx) = display_dupl.dupl.get_device_and_ctx();
             let mut tex_reader = TextureReader::new(dev, ctx);
@@ -92,12 +89,10 @@ struct DisplayDupl {
 
 impl DisplayDupl {
     pub fn get_raw_texture(&self) -> anyhow::Result<&ID3D11Texture2D> {
-        unsafe {
-            match &self.texture {
-                None => { anyhow::bail!("No texture available") }
-                Some(tex) => {
-                    Ok(tex.as_raw_ref())
-                }
+        match &self.texture {
+            None => { anyhow::bail!("No texture available") }
+            Some(tex) => {
+                Ok(tex.as_raw_ref())
             }
         }
     }
@@ -113,39 +108,37 @@ fn get_display_dimensions(display: u16) -> anyhow::Result<(u16, u16)> {
 
 fn get_display_dupl<T>(display: u16, action: impl Fn(&mut DisplayDupl) -> anyhow::Result<T>) -> anyhow::Result<T>
 {
-    unsafe {
-        {
-            let mut guard = DISPLAY_MAP.lock().unwrap();
-            let entry = guard.entry(display);
-            let display_dupl = entry.or_insert_with(|| {
-                let dupl = init_dxgl_inner(display);
-                let arc = Arc::new(RwLock::new(dupl));
-                let arc_clone = arc.clone();
-                std::thread::spawn(move || {
-                    info!("frame_reader_thread started for display {}", display);
-                    display_duplicate_loop(arc_clone);
-                });
-                return arc;
+    {
+        let mut guard = DISPLAY_MAP.lock().unwrap();
+        let entry = guard.entry(display);
+        let display_dupl = entry.or_insert_with(|| {
+            let dupl = init_dxgl_inner(display);
+            let arc = Arc::new(RwLock::new(dupl));
+            let arc_clone = arc.clone();
+            std::thread::spawn(move || {
+                info!("frame_reader_thread started for display {}", display);
+                display_duplicate_loop(arc_clone);
             });
-            let result = display_dupl.write();
-            match result {
-                Err(e) => {
-                    anyhow::bail!("Error in frame_reader_thread: {:?}", e)
-                }
-                Ok(mut display_dupl) => {
-                    return action(display_dupl.deref_mut());
-                }
+            return arc;
+        });
+        let result = display_dupl.write();
+        match result {
+            Err(e) => {
+                anyhow::bail!("Error in frame_reader_thread: {:?}", e)
+            }
+            Ok(mut display_dupl) => {
+                return action(display_dupl.deref_mut());
             }
         }
     }
 }
 
 fn display_duplicate_loop(arc_clone: Arc<RwLock<DisplayDupl>>) {
-    const FRAME_REFRESH: core::time::Duration = core::time::Duration::from_millis(1000 / 60);
+    const FRAME_REFRESH: core::time::Duration = core::time::Duration::from_millis(1000 / 10);
     loop {
         let start_time = std::time::Instant::now();
         {
-            let mut display_dupl = arc_clone.write();
+            let display_dupl = arc_clone.write();
             match display_dupl {
                 Ok(mut display_dupl) => {
                     let display_dupl = display_dupl.deref_mut();
@@ -186,6 +179,9 @@ fn init_dxgl_inner(display: u16) -> DisplayDupl {
 
     // get output duplication api
     let mut dupl = DesktopDuplicationApi::new(adapter, display_output.clone()).unwrap();
+    dupl.configure(DuplicationApiOptions {
+        skip_cursor: true,
+    });
     let texture = dupl.acquire_next_frame_now().unwrap();
     info!("texture: {:?}", texture.desc());
 

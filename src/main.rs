@@ -1,31 +1,21 @@
-use std::ffi::OsString;
-use clap::Parser;
-use log::{debug, error, info, trace};
-use win_desktop_duplication::*;
-use win_desktop_duplication::{devices::*, tex_reader::*};
 use std::io::Write;
 use std::net::TcpStream;
-use std::sync::{Arc, LockResult, RwLock};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::mpsc::channel;
 use std::thread;
-use std::thread::{Scope, sleep, spawn};
-use anyhow::{anyhow, bail};
-use rust_vnc_lib::{Error, protocol, Rect};
-use rust_vnc_lib::Error::Server;
-use rust_vnc_lib::protocol::{C2S, ClientInit, Message, S2C};
-use windows::core::Interface;
-use windows::Win32::Foundation::BOOL;
-use windows::Win32::Graphics::Dxgi::IDXGISurface1;
-use windows::Win32::Graphics::Gdi;
+
+use clap::Parser;
+use log::{debug, error, info, trace};
+use rust_vnc::{Error, protocol};
+use rust_vnc::protocol::{C2S, ClientInit, Message};
 use server_connection::{ServerConnection, ServerState};
+use server_events::input;
 use settings::PIXEL_FORMAT;
-use win_desktop_duplication::outputs::Display;
-use crate::dxgl::{DisplayDuplWrapper};
+
+use crate::dxgl::DisplayDuplWrapper;
 
 mod server_connection;
 mod dxgl;
 mod settings;
+mod server_events;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -109,12 +99,12 @@ fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> 
         name: "rust-vnc".to_string(),
     };
     server_init.write_to(&mut tcp_stream)?;
+    let tcp_stream_copy = tcp_stream.try_clone()?;
     let server_state = ServerState::new();
-    let mut server_connection =
-        ServerConnection::new(tcp_stream.try_clone()?, &server_state, &mut display_duplicator);
-
     thread::scope(|s| -> anyhow::Result<()>
     {
+        let mut server_connection =
+            ServerConnection::new(&tcp_stream_copy, &server_state, &mut display_duplicator);
         s.spawn(move || {
             let result = server_connection.update_frame_loop();
             if let Err(e) = result {
@@ -135,9 +125,9 @@ fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn server_loop(mut tcp_stream: &mut TcpStream, server_state: &ServerState) -> anyhow::Result<()> {
+fn server_loop(tcp_stream: &mut TcpStream, server_state: &ServerState) -> anyhow::Result<()> {
     loop {
-        let message_result: rust_vnc_lib::Result<C2S> = C2S::read_from(&mut tcp_stream);
+        let message_result: rust_vnc::Result<C2S> = C2S::read_from(tcp_stream);
         if let Err(Error::Disconnected) = message_result {
             return Ok(());
         }
@@ -156,12 +146,20 @@ fn server_loop(mut tcp_stream: &mut TcpStream, server_state: &ServerState) -> an
             }
             C2S::KeyEvent { down, key } => {
                 info!("key event: down: {}, key: {}", down, key);
+                let c2s = input::handle_key_event(down, key,
+                                                  |key| { server_state.get_last_key_input(key) });
+                if let C2S::KeyEvent { down, key } = c2s {
+                    server_state.set_last_key_input(key, down);
+                }
             }
             C2S::PointerEvent { x_position, y_position, button_mask } => {
-                trace!("pointer event: x_position: {}, y_position: {}, button_mask: {}", x_position, y_position, button_mask);
+                trace!("pointer event: x_position: {}, y_position: {}, button_mask: {:?}", x_position, y_position, button_mask);
+                input::handle_pointer_event(server_state, message);
             }
             C2S::CutText(text) => {
                 info!("cut text: {:?}", text);
+                input::handle_clipboard_paste(text)
+                    .unwrap_or_else(|e| error!("Failed to paste clipboard: {:?}", e));
             }
         }
     };

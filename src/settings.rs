@@ -1,4 +1,4 @@
-pub const PIXEL_FORMAT: rust_vnc_lib::PixelFormat = rust_vnc_lib::PixelFormat {
+pub const PIXEL_FORMAT: rust_vnc::PixelFormat = rust_vnc::PixelFormat {
     bits_per_pixel: 32,
     depth: 24,
     big_endian: false,
