@@ -136,7 +136,7 @@ impl TryClone for Box<dyn CloneableStream> {
     }
 }
 
-pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl FnMut(Box<dyn CloneableStream>)) -> anyhow::Result<(Sender<()>)> {
+pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl FnMut(Box<dyn CloneableStream>)) -> anyhow::Result<Sender<()>> {
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     if use_tunnelling {
         let tunnel_host = format!("ws://{}", bind);
