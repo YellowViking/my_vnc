@@ -1,21 +1,18 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;
 
 use clap::Parser;
 use log::{debug, error, info, trace};
 use rust_vnc::{Error, protocol};
-use rust_vnc::protocol::{C2S, ClientInit, Message};
-use server_connection::{ServerConnection, ServerState};
-use server_events::input;
-use settings::PIXEL_FORMAT;
-
-use crate::dxgl::DisplayDuplWrapper;
-
-mod server_connection;
-mod dxgl;
-mod settings;
-mod server_events;
+use rust_vnc::protocol::{C2S, ClientInit, Encoding, Message};
+use my_vnc::dxgl::DisplayDuplWrapper;
+use my_vnc::network_stream::{CloneableStream, stream_factory_loop, TryClone};
+use my_vnc::server_connection::ServerConnection;
+use my_vnc::server_events::input;
+use my_vnc::server_state::ServerState;
+use my_vnc::settings;
+use my_vnc::settings::PIXEL_FORMAT;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -26,33 +23,19 @@ struct Args {
     port: u16,
     #[arg(short, long, default_value_t = 0, env = "DISPLAY")]
     display: u16,
+    #[arg(long, default_value = "false")]
+    use_tunnelling: bool,
 }
 
 fn main() {
     let args = Args::parse();
     println!("init logger");
-    env_logger::Builder::from_default_env()
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{}:{} {} [{}] - {}",
-                record.file().unwrap_or("unknown"),
-                record.line().unwrap_or(0),
-                chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
-                record.level(),
-                record.args()
-            )
-        })
-        .init();
+    settings::init_logger();
     info!("args: {:?}", args);
 
     let bind = format!("{}:{}", args.host, args.port);
-    let listener
-        = std::net::TcpListener::bind(bind).unwrap();
-    info!("Listening on port {}", listener.local_addr().unwrap().port());
     let mut connection_id = 0;
-    for stream in listener.incoming() {
-        let stream = stream.unwrap();
+    let result = stream_factory_loop(bind.as_str(), args.use_tunnelling, |stream| {
         thread::spawn(move || {
             match handle_client(stream, args.display) {
                 Ok(_) => {
@@ -65,10 +48,13 @@ fn main() {
         });
         println!("Connection established! {}", connection_id);
         connection_id += 1;
+    });
+    if let Err(e) = result {
+        error!("Failed to start server: {:?}", e);
     }
 }
 
-fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> {
+fn handle_client(mut tcp_stream: Box<dyn CloneableStream>, display: u16) -> anyhow::Result<()> {
     let version = protocol::Version::Rfb38;
     version.write_to(&mut tcp_stream)?;
     let client_version = protocol::Version::read_from(&mut tcp_stream)?;
@@ -104,7 +90,7 @@ fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> 
     thread::scope(|s| -> anyhow::Result<()>
     {
         let mut server_connection =
-            ServerConnection::new(&tcp_stream_copy, &server_state, &mut display_duplicator);
+            ServerConnection::new(tcp_stream_copy, &server_state, &mut display_duplicator);
         s.spawn(move || {
             let result = server_connection.update_frame_loop();
             if let Err(e) = result {
@@ -115,7 +101,7 @@ fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> 
                 }
             }
         });
-        let loop_result = server_loop(&mut tcp_stream, &server_state);
+        let loop_result = server_loop(tcp_stream, &server_state);
         if let Err(e) = loop_result {
             error!("Failed to handle message: {:?}", e);
         }
@@ -125,9 +111,9 @@ fn handle_client(mut tcp_stream: TcpStream, display: u16) -> anyhow::Result<()> 
     Ok(())
 }
 
-fn server_loop(tcp_stream: &mut TcpStream, server_state: &ServerState) -> anyhow::Result<()> {
+fn server_loop(mut tcp_stream: Box<dyn CloneableStream>, server_state: &ServerState) -> anyhow::Result<()> {
     loop {
-        let message_result: rust_vnc::Result<C2S> = C2S::read_from(tcp_stream);
+        let message_result: rust_vnc::Result<C2S> = C2S::read_from(&mut tcp_stream);
         if let Err(Error::Disconnected) = message_result {
             return Ok(());
         }
@@ -138,6 +124,10 @@ fn server_loop(tcp_stream: &mut TcpStream, server_state: &ServerState) -> anyhow
             }
             C2S::SetEncodings(encs) => {
                 info!("set encodings: {:?}", encs);
+                if encs.contains(&Encoding::Known(protocol::KnownEncoding::Zlib)) {
+                    server_state.set_frame_encoding(Encoding::Known(protocol::KnownEncoding::Zlib));
+                    info!("set frame encoding: {:?}", server_state.get_frame_encoding());
+                }
             }
             C2S::FramebufferUpdateRequest { incremental, x_position, y_position, width, height } => {
                 debug!("framebuffer update request: incremental: {}, x_position: {}, y_position: {}, width: {}, height: {}, frame: {:?}

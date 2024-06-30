@@ -1,1 +1,1 @@
-pub(crate) mod input;
+pub mod input;

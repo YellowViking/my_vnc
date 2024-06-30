@@ -1,57 +1,79 @@
-use std::{mem};
-use std::collections::HashMap;
+use std::cell::{ RefCell};
+use std::cmp::max;
+use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::io::Write;
-use std::net::TcpStream;
-use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicUsize};
-use std::sync::RwLock;
+use std::io::{Read, Write};
+use std::mem;
+use std::mem::size_of;
 use std::thread::sleep;
 
 use anyhow::bail;
+use bytesize::ByteSize;
+use flate2::write::ZlibEncoder;
 use log::{debug, error, info, trace, warn};
-use rust_vnc::protocol::{ButtonMaskFlags, Message, S2C};
+use rust_vnc::protocol::{Message, S2C};
 use rust_vnc::protocol;
-use windows::Win32::Foundation::{BOOL, COLORREF, POINT};
+use windows::Win32::Foundation;
+use windows::Win32::Foundation::{BOOL, COLORREF, POINT, SIZE};
 use windows::Win32::Graphics::Gdi;
-use windows::Win32::Graphics::Gdi::{BITMAP, GetBitmapBits, GetObjectW, GetSysColor};
+use windows::Win32::Graphics::Gdi::{BITMAP, GetBitmapBits, GetObjectW, GetSysColor, GetTextExtentPointA};
 use windows::Win32::UI::WindowsAndMessaging::{CURSORINFO, GetCursorInfo, GetCursorPos, GetIconInfo, ICONINFO};
 
 use crate::dxgl::DisplayDuplWrapper;
+use crate::network_stream::CloneableStream;
+use crate::server_state::ServerState;
 
-pub struct ServerConnection<'a> {
-    tcp_stream: &'a TcpStream,
+pub struct ServerConnection<'a>
+{
+    tcp_stream: MonitoredTcpStream<'a>,
     pic_data: Vec<u8>,
     server_state: &'a ServerState,
     display_dupl_wrapper: &'a mut DisplayDuplWrapper,
+    zlib_encoder: RefCell<ZlibEncoder<VecDeque<u8>>>
 }
 
-pub struct ServerState {
-    frame: AtomicUsize,
-    connection_state: AtomicI32,
-    cursor_sent: AtomicIsize,
-    last_pointer_input: RwLock<protocol::C2S>,
-    last_key_input: RwLock<HashMap<u32, bool>>,
-    last_clipboard: RwLock<String>,
+struct MonitoredTcpStream<'a> {
+    tcp_stream: Box<dyn CloneableStream>,
+    server_state: &'a ServerState,
 }
 
-pub enum ConnectionState {
-    Init = -1,
-    Ready = 0,
-    Terminating = 1,
+impl<'a> Write for MonitoredTcpStream<'a> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let result = self.tcp_stream.write(buf);
+        if result.is_ok() {
+            self.server_state.add_bytes_send(buf.len());
+        }
+        result
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.tcp_stream.flush()
+    }
+}
+
+impl<'a> MonitoredTcpStream<'a> {
+    fn new(tcp_stream: Box<dyn CloneableStream>, server_state: &'a ServerState) -> Self {
+        MonitoredTcpStream {
+            tcp_stream,
+            server_state,
+        }
+    }
 }
 
 impl<'a> ServerConnection<'a> {
-    pub fn new(tcp_stream: &'a TcpStream, server_state: &'a ServerState, display_dupl_wrapper: &'a mut DisplayDuplWrapper) -> Self {
+    pub fn new(tcp_stream: Box<dyn CloneableStream>, server_state: &'a ServerState, display_dupl_wrapper: &'a mut DisplayDuplWrapper) -> Self {
         let pic_data: Vec<u8> = vec![0; 0];
+        let tcp_stream = MonitoredTcpStream::new(tcp_stream, server_state);
         ServerConnection {
             tcp_stream,
             pic_data,
             server_state,
             display_dupl_wrapper,
+            zlib_encoder: RefCell::new(ZlibEncoder::new(VecDeque::new(), flate2::Compression::best())),
         }
     }
 
-    pub(crate) fn update_frame_loop(&mut self) -> anyhow::Result<()> {
+    pub fn update_frame_loop(&mut self) -> anyhow::Result<()> {
         let duration = std::time::Duration::from_millis(1000 / 10);
         info!("update_frame loop started");
         loop {
@@ -80,21 +102,21 @@ impl<'a> ServerConnection<'a> {
 
     fn send_clipboard(&mut self) -> anyhow::Result<()> {
         let text = clipboard_win::get_clipboard_string().map_err(|e| anyhow::anyhow!(e))?;
-        let mut guard = self.server_state.last_clipboard.write().unwrap();
-        if *guard == text {
-            return Ok(());
-        }
-        let message = S2C::CutText(text.clone());
-        message.write_to(&mut self.tcp_stream)?;
-        self.tcp_stream.flush()?;
-        *guard = text;
-        Ok(())
+        self.server_state.get_and_set_last_clipboard(|last| {
+            if last == text {
+                return Ok(text);
+            }
+            let message = S2C::CutText(text.clone());
+            message.write_to(&mut self.tcp_stream)?;
+            self.tcp_stream.flush()?;
+            Ok(text)
+        })
     }
 
     fn acquire_frame(&mut self) -> anyhow::Result<()> {
         // draw frame count on the hdc
-        self.display_dupl_wrapper.draw_to_texture(|hdc| -> anyhow::Result<()> {
-            let frame = self.server_state.frame.load(std::sync::atomic::Ordering::Relaxed);
+        self.display_dupl_wrapper.draw_to_texture(|hdc| -> anyhow::Result<Foundation::RECT> {
+            let frame = self.server_state.get_frame();
 
             let mut cursor_pos = POINT::default();
             unsafe {
@@ -102,9 +124,25 @@ impl<'a> ServerConnection<'a> {
                     error!("GetCursorPos failed with error: {:?}", e);
                 }
             }
-
-            let text = format!("Frame: {}, Pos: ({}, {})", frame, cursor_pos.x, cursor_pos.y);
+            let bytes = ByteSize::b(self.server_state.get_bytes_send() as u64);
+            let text = format!("Frame: {}, Pos: ({}, {}) Bytes: {}", frame, cursor_pos.x, cursor_pos.y, bytes);
+            let mut text_size = SIZE::default();
+            let dirty_rect;
             unsafe {
+                let bool = GetTextExtentPointA(hdc, text.as_str().as_ref(), &mut text_size);
+                if !bool.as_bool() {
+                    bail!("Failed to get text size, error: {:?}", windows::Win32::Foundation::GetLastError())
+                }
+                let mut size = self.server_state.get_last_stats_size();
+                self.server_state.set_last_stats_size(text_size);
+                size.cx = max(size.cx, text_size.cx);
+                size.cy = max(size.cy, text_size.cy);
+                dirty_rect = Foundation::RECT {
+                    left: 0,
+                    top: 0,
+                    right: size.cx,
+                    bottom: size.cy,
+                };
                 Gdi::SetBkMode(hdc, Gdi::TRANSPARENT);
                 let sys_color = GetSysColor(Gdi::COLOR_HIGHLIGHTTEXT);
                 Gdi::SetTextColor(hdc, COLORREF(sys_color));
@@ -116,7 +154,7 @@ impl<'a> ServerConnection<'a> {
                     }
                 }
             };
-            Ok(())
+            Ok(dirty_rect)
         })?;
 
         let result = self.display_dupl_wrapper.copy_to_vec();
@@ -133,22 +171,45 @@ impl<'a> ServerConnection<'a> {
     }
 
     fn send_frame(&mut self) -> anyhow::Result<()> {
+        let pixel_byte_size = 4i32;
         debug!("frame acquired: {} bytes dimensions: {:?}", self.pic_data.len(), self.display_dupl_wrapper.get_dimensions()?);
+        let mut rects = { self.display_dupl_wrapper.get_dirty_rects() };
+        let full_rect = vec![Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: self.display_dupl_wrapper.get_dimensions()?.0 as i32,
+            bottom: self.display_dupl_wrapper.get_dimensions()?.1 as i32,
+        }];
+        if self.server_state.get_frame() < 2 {
+            info!("sending full frame {:?}", full_rect);
+            rects = &full_rect;
+        }
         let message = S2C::FramebufferUpdate {
-            count: 1,
-        };
-        let (width, height) = self.display_dupl_wrapper.get_dimensions()?;
-        let rect = protocol::Rectangle {
-            x_position: 0,
-            y_position: 0,
-            width,
-            height,
-            encoding: protocol::Encoding::Raw,
+            count: rects.len() as u16,
         };
         message.write_to(&mut self.tcp_stream)?;
-        rect.write_to(&mut self.tcp_stream)?;
-        self.tcp_stream.write_all(&self.pic_data)?;
+        let line_size = (self.display_dupl_wrapper.get_dimensions()?.0 as i32 * pixel_byte_size) as i32;
+
+        for rect in rects {
+            let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
+            let mut pixel_buf = Vec::with_capacity((width * height * pixel_byte_size) as usize + size_of::<protocol::Rectangle>());
+            let vnc_rect = protocol::Rectangle {
+                x_position: rect.left as u16,
+                y_position: rect.top as u16,
+                width: width as u16,
+                height: height as u16,
+                encoding: protocol::Encoding::Unknown(-1),
+            };
+            for line in 0..height {
+                let start = (rect.top + line) * line_size + rect.left * pixel_byte_size;
+                let end = start + width * pixel_byte_size;
+                pixel_buf.write_all(&self.pic_data[start as usize..end as usize])?
+            }
+            pixel_buf.flush()?;
+            self.tcp_stream.write_all(&self.encode_rect(vnc_rect, pixel_buf)?)?;
+        }
         self.tcp_stream.flush()?;
+
         Ok(())
     }
 
@@ -199,7 +260,7 @@ impl<'a> ServerConnection<'a> {
                 y_position: 0,
                 width: icon_bitmap.bmWidth as u16,
                 height: icon_bitmap.bmHeight as u16,
-                encoding: protocol::Encoding::Cursor,
+                encoding: protocol::Encoding::Known(protocol::KnownEncoding::Cursor),
             };
             trace!("sending cursor: {:?}", rect);
             message.write_to(&mut self.tcp_stream)?;
@@ -212,69 +273,27 @@ impl<'a> ServerConnection<'a> {
         };
         Ok(())
     }
-}
+    fn encode_rect(&self, mut rect: protocol::Rectangle, buf: Vec<u8>) -> anyhow::Result<Vec<u8>> {
+        let mut encoder = self.zlib_encoder.borrow_mut();
+        let buf_len = buf.len();
+        let mut ret = Vec::with_capacity(buf_len);
+        if self.server_state.get_frame_encoding() == protocol::Encoding::Known(protocol::KnownEncoding::Zlib) {
+            let out = encoder.total_out() as usize;
+            encoder.write_all(&buf)?;
+            encoder.flush()?;
+            let mut compressed = Vec::with_capacity(encoder.total_out() as usize - out);
+            encoder.read_to_end(&mut compressed)?;
 
-impl ServerState {
-    pub fn new() -> Self {
-        ServerState {
-            frame: AtomicUsize::new(0),
-            connection_state: AtomicI32::new(ConnectionState::Init as i32),
-            cursor_sent: AtomicIsize::new(-1),
-            last_pointer_input: RwLock::new(protocol::C2S::PointerEvent {
-                x_position: 0,
-                y_position: 0,
-                button_mask: ButtonMaskFlags::empty(),
-            }),
-            last_key_input: RwLock::new(HashMap::new()),
-            last_clipboard: RwLock::new(String::new()),
+            rect.encoding = protocol::Encoding::Known(protocol::KnownEncoding::Zlib);
+            rect.write_to(&mut ret)?;
+            compressed.write_to(&mut ret)?;
+            trace!("compressed: {} bytes, uncompressed: {} bytes", ret.len(), buf_len + size_of::<protocol::Rectangle>());
+            
+        } else {
+            rect.encoding = protocol::Encoding::Known(protocol::KnownEncoding::Raw);
+            rect.write_to(&mut ret)?;
+            ret.write_all(&buf)?;
         }
-    }
-
-    pub fn get_frame(&self) -> usize {
-        self.frame.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn get_ready(&self) -> bool {
-        self.connection_state.load(std::sync::atomic::Ordering::Relaxed) == ConnectionState::Ready as i32
-    }
-
-    pub fn get_terminating(&self) -> bool {
-        self.connection_state.load(std::sync::atomic::Ordering::Relaxed) == ConnectionState::Terminating as i32
-    }
-
-    pub fn set_ready(&self) {
-        self.connection_state.store(ConnectionState::Ready as i32, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn set_terminating(&self) {
-        self.connection_state.store(ConnectionState::Terminating as i32, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn inc_frame(&self) {
-        self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn get_cursor_sent(&self) -> isize {
-        self.cursor_sent.load(std::sync::atomic::Ordering::Relaxed)
-    }
-
-    pub fn set_cursor_sent(&self, hcursor: isize) {
-        self.cursor_sent.store(hcursor, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub fn set_last_pointer_input(&self, input: protocol::C2S) {
-        *self.last_pointer_input.write().unwrap() = input;
-    }
-
-    pub fn get_last_pointer_input<T>(&self, cb: impl FnOnce(&protocol::C2S) -> T) -> T {
-        cb(&*self.last_pointer_input.read().unwrap())
-    }
-
-    pub fn set_last_key_input(&self, key: u32, down: bool) {
-        self.last_key_input.write().unwrap().insert(key, down);
-    }
-
-    pub fn get_last_key_input(&self, key: u32) -> bool {
-        self.last_key_input.read().unwrap().get(&key).copied().unwrap_or(false)
+        Ok(ret)
     }
 }

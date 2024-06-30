@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::ops::BitXor;
 use clipboard_win::set_clipboard_string;
 
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use rust_vnc::protocol::{ButtonMaskFlags, C2S};
 use windows::Win32::Foundation::GetLastError;
 use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VkKeyScanA};
@@ -11,7 +11,7 @@ use xkeysym;
 use xkeysym::{key, Keysym};
 use win_key_codes;
 
-use crate::server_connection::ServerState;
+use crate::server_state::ServerState;
 
 pub fn handle_pointer_event(server_state: &ServerState, message: C2S) {
     if let C2S::PointerEvent { x_position, y_position, button_mask } = message {
@@ -90,6 +90,7 @@ pub fn handle_pointer_event(server_state: &ServerState, message: C2S) {
         unsafe {
             if let Some(input) = input {
                 let input_array = [input];
+                trace!("pointer event: {:?}", input.Anonymous.mi);
                 let send_input = SendInput(&input_array, size_of::<INPUT>() as i32);
                 if send_input == 0 {
                     let last_error = GetLastError();
@@ -206,6 +207,6 @@ pub fn handle_key_event(down: bool, key: u32, get_last_key_input: impl Fn(u32) -
     C2S::KeyEvent { down, key }
 }
 
-pub(crate) fn handle_clipboard_paste(text: String) -> anyhow::Result<()> {
+pub fn handle_clipboard_paste(text: String) -> anyhow::Result<()> {
     set_clipboard_string(text.as_str()).map_err(|e| anyhow::anyhow!(e))
 }

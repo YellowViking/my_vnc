@@ -3,13 +3,14 @@ use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, RwLock};
 
 use lazy_static::lazy_static;
-use log::{debug, error, info};
+use log::{debug, error, info, trace};
 use windows::core::Interface;
+use windows::Win32::Foundation;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device4, ID3D11Texture2D};
 use windows::Win32::Graphics::Dxgi::IDXGISurface1;
 use windows::Win32::Graphics::Gdi::HDC;
 
-use win_desktop_duplication::{co_init, DesktopDuplicationApi, DuplicationApiOptions, set_process_dpi_awareness};
+use win_desktop_duplication::{co_init, DesktopDuplicationApi, DuplicationApiOptions, MoveRect, set_process_dpi_awareness};
 use win_desktop_duplication::devices::AdapterFactory;
 use win_desktop_duplication::outputs::Display;
 use win_desktop_duplication::tex_reader::TextureReader;
@@ -18,6 +19,7 @@ use win_desktop_duplication::texture::Texture;
 pub struct DisplayDuplWrapper {
     display: u16,
     id3d11texture2d: ID3D11Texture2D,
+    dirty_rects: Vec<Foundation::RECT>,
 }
 
 impl DisplayDuplWrapper {
@@ -41,6 +43,7 @@ impl DisplayDuplWrapper {
                 Ok(DisplayDuplWrapper {
                     display,
                     id3d11texture2d: id3d11texture2d.unwrap(),
+                    dirty_rects: Vec::new(),
                 })
             }
         })
@@ -53,19 +56,21 @@ impl DisplayDuplWrapper {
                 let src_texture = display_dupl.get_raw_texture()?;
                 dev_ctx.CopyResource(&self.id3d11texture2d, src_texture);
                 dev_ctx.Flush();
+                self.dirty_rects = display_dupl.get_dirty_rects().clone();
                 debug!("copied from desktop {:?} to {:?}", src_texture, &self.id3d11texture2d);
                 Ok(())
             }
         })
     }
 
-    pub fn draw_to_texture(&self, draw_action: impl Fn(HDC) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    pub fn draw_to_texture(&mut self, draw_action: impl Fn(HDC) -> anyhow::Result<Foundation::RECT>) -> anyhow::Result<()> {
         unsafe {
             let surface: IDXGISurface1 = self.id3d11texture2d.cast()?;
             let hdc: HDC;
             hdc = surface.GetDC(false)?;
-            draw_action(hdc)?;
+            let dirty = draw_action(hdc)?;
             surface.ReleaseDC(None)?;
+            self.dirty_rects.push(dirty);
             Ok(())
         }
     }
@@ -78,6 +83,10 @@ impl DisplayDuplWrapper {
             tex_reader.get_data(&mut vec, &Texture::new(self.id3d11texture2d.clone()))?;
             Ok(vec)
         })
+    }
+    
+    pub fn get_dirty_rects(&self) -> &Vec<Foundation::RECT> {
+        &self.dirty_rects
     }
 }
 
@@ -96,6 +105,14 @@ impl DisplayDupl {
             }
         }
     }
+    
+    pub fn get_moved_rects(&self) -> &Vec<MoveRect> {
+        self.dupl.get_moved_rects()
+    }
+    
+    pub fn get_dirty_rects(&self) -> &Vec<Foundation::RECT> {
+        self.dupl.get_dirty_rects()
+    }
 }
 
 fn get_display_dimensions(display: u16) -> anyhow::Result<(u16, u16)> {
@@ -106,7 +123,7 @@ fn get_display_dimensions(display: u16) -> anyhow::Result<(u16, u16)> {
     })
 }
 
-fn get_display_dupl<T>(display: u16, action: impl Fn(&mut DisplayDupl) -> anyhow::Result<T>) -> anyhow::Result<T>
+fn get_display_dupl<T>(display: u16, mut action: impl FnMut(&mut DisplayDupl) -> anyhow::Result<T>) -> anyhow::Result<T>
 {
     {
         let mut guard = DISPLAY_MAP.lock().unwrap();
@@ -161,6 +178,8 @@ fn display_duplicate_loop(arc_clone: Arc<RwLock<DisplayDupl>>) {
 fn process_frame(display_dupl: &mut DisplayDupl) -> anyhow::Result<()> {
     display_dupl.display_output.wait_for_vsync()?;
     let tex = display_dupl.dupl.acquire_next_frame_now();
+    trace!("Moved rects: {:?}", display_dupl.get_moved_rects());
+    trace!("Dirty rects: {:?}", display_dupl.get_dirty_rects());
     display_dupl.texture = Some(tex?);
     Ok(())
 }
