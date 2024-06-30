@@ -27,7 +27,7 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    println!("init logger");
+    println!("init logger for server Cargo version: {}", env!("CARGO_PKG_VERSION"));
     settings::init_logger();
     info!("args: {:?}", args);
 
@@ -35,17 +35,17 @@ fn main() {
     let mut connection_id = 0;
     let result = stream_factory_loop(bind.as_str(), args.use_tunnelling, |stream| {
         thread::spawn(move || {
+            info!("Connection established! {}", connection_id);
+            connection_id += 1;
             match handle_client(stream, args.display) {
                 Ok(_) => {
-                    println!("Connection {} closed", connection_id);
+                    info!("Connection {} closed", connection_id);
                 }
                 Err(e) => {
-                    println!("Connection {} closed with error: {:?}", connection_id, e);
+                    info!("Connection {} closed with error: {:?}", connection_id, e);
                 }
             }
         });
-        println!("Connection established! {}", connection_id);
-        connection_id += 1;
     });
     if let Err(e) = result {
         error!("Failed to start server: {:?}", e);
@@ -56,6 +56,7 @@ fn main() {
 
 fn handle_client(mut tcp_stream: Box<dyn CloneableStream>, display: u16) -> anyhow::Result<()> {
     let version = protocol::Version::Rfb38;
+    info!("server version: {:?}", version);
     version.write_to(&mut tcp_stream)?;
     let client_version = protocol::Version::read_from(&mut tcp_stream)?;
     if client_version != version {

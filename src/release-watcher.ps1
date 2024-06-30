@@ -23,7 +23,7 @@ try
         Expand-Archive -Path $path -DestinationPath C:\Users\User\Desktop -Force
         # set environment variable
         $env:RUST_BACKTRACE = 1
-        $env:RUST_LOG = "INFO"
+        $env:RUST_LOG = "TRACE"
         Invoke-Expression "C:\Users\User\Desktop\winvnc-server.exe --host fox-pc --port 80 --use-tunnelling"
         Write-Host "File $path has been copied to Desktop and started"
     }

@@ -3,10 +3,12 @@ use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc::Sender;
-use log::{info, warn};
-use tungstenite::ClientRequestBuilder;
+use log::{info, trace, warn};
+use tungstenite::{ClientRequestBuilder, Message};
 use tungstenite::http::Uri;
 use tungstenite::stream::MaybeTlsStream;
+use std::thread::sleep;
+use anyhow::anyhow;
 
 type WebSocket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -17,22 +19,39 @@ struct TunneledTcpStream {
 impl TunneledTcpStream {
     fn new(tunnel_host: &str) -> anyhow::Result<TunneledTcpStream> {
         let req = ClientRequestBuilder::new(Uri::from_str(tunnel_host)?);
-        let ws_stream: WebSocket = tungstenite::client::connect(req)?.0;
+        let mut ws_stream: WebSocket = tungstenite::client::connect(req)?.0;
+        let message = ws_stream.read().map_err(|e| {
+            warn!("TunneledTcpStream: reading TUNNEL-CONNECT {:?}", e);
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        })?;
+        if message != tungstenite::Message::Text(TUNNEL_CONNECT.to_string()) {
+            warn!("TunneledTcpStream: unexpected message: {:?}", message);
+            return Err(anyhow::anyhow!("unexpected message"));
+        }
+        info!("TunneledTcpStream: connected");
         Ok(TunneledTcpStream { ws_stream })
     }
 }
 
 impl Read for TunneledTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        trace!("TunneledTcpStream: waiting for message");
         let msg = self.ws_stream.read().map_err(|e| {
-            warn!("TunneledTcpStream: {:?}", e);
-            std::io::Error::new(std::io::ErrorKind::Other, e)
+            match e {
+                tungstenite::Error::Io(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::io::Error::new(std::io::ErrorKind::WouldBlock, e),
+                _ => std::io::Error::new(std::io::ErrorKind::Other, e)
+            }
         })?;
         match msg {
             tungstenite::Message::Binary(data) => {
                 let len = data.len();
                 buf[..len].copy_from_slice(&data);
+                trace!("TunneledTcpStream: {} received", len);
                 Ok(len)
+            }
+            tungstenite::Message::Close(frame) => {
+                trace!("TunneledTcpStream: closing {:?}", frame);
+                Ok(0)
             }
             _ => {
                 warn!("TunneledTcpStream unexpected message: {:?}", msg);
@@ -44,14 +63,17 @@ impl Read for TunneledTcpStream {
 
 impl Write for TunneledTcpStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.ws_stream.write(tungstenite::Message::Binary(Vec::from(buf))).map_err(|e| {
+        trace!("TunneledTcpStream: {} sending", buf.len());
+        self.ws_stream.send(tungstenite::Message::Binary(Vec::from(buf))).map_err(|e| {
             warn!("TunneledTcpStream: {:?}", e);
             std::io::Error::new(std::io::ErrorKind::Other, e)
         })?;
+        trace!("TunneledTcpStream: {} sent", buf.len());
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        trace!("TunneledTcpStream: flushing");
         self.ws_stream.flush().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
     }
 }
@@ -71,22 +93,22 @@ impl CloneableTunneledTcpStream {
 
 impl Read for CloneableTunneledTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let result = self.tunneled_tcp_stream.lock().unwrap().read(buf);
-        if !self.notified {
-            self.traffic_sender.send(()).unwrap();
-            self.notified = true;
-            info!("notified");
-        }
+        let result = ws_stream_message_poll(|| self.tunneled_tcp_stream.lock().unwrap().read(buf));
+        trace!("CloneableTunneledTcpStream: {:?} received", result);
         result
     }
 }
 
 impl Write for CloneableTunneledTcpStream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.tunneled_tcp_stream.lock().unwrap().write(buf)
+        trace!("CloneableTunneledTcpStream: {} sending", buf.len());
+        let result = self.tunneled_tcp_stream.lock().unwrap().write(buf);
+        trace!("CloneableTunneledTcpStream: {:?} sent", result);
+        result
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        trace!("CloneableTunneledTcpStream: flushing");
         self.tunneled_tcp_stream.lock().unwrap().flush()
     }
 }
@@ -132,7 +154,7 @@ impl TryClone for TcpStream {
 impl TryClone for Box<dyn CloneableStream> {
     fn try_clone(&self) -> Result<Box<dyn CloneableStream>, anyhow::Error>
     {
-        Ok(self.box_try_clone()? as Box<dyn CloneableStream>)
+        Ok(self.box_try_clone()?)
     }
 }
 
@@ -143,7 +165,7 @@ pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl
         loop {
             let tunneled_tcp_stream = CloneableTunneledTcpStream::new(&tunnel_host, tx.clone())?;
             on_stream(Box::new(tunneled_tcp_stream));
-            rx.recv()?;
+            // rx.recv()?;
         }
     } else {
         let tcp_listener = TcpListener::bind(bind)?;
@@ -153,4 +175,23 @@ pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl
         }
     }
     Ok(tx.clone())
+}
+
+pub const TUNNEL_CONNECT: &'static str = "TUNNEL-CONNECT";
+
+pub fn ws_stream_message_poll<T>(mut read: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    loop {
+        let result = { read() };
+        match result {
+            Ok(msg) => break Ok(msg),
+            Err(e) => {
+                match e.kind() {
+                    std::io::ErrorKind::WouldBlock => {
+                        sleep(std::time::Duration::from_millis(10));
+                    }
+                    _ => break Err(e),
+                }
+            }
+        }
+    }
 }
