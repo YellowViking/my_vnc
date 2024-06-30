@@ -18,13 +18,13 @@ try
         $last_write_time = $stamp
         Write-Host "File $path has been changed"
         # kill my-vnc.exe
-        Stop-Process -Name "my-vnc" -Force
+        Stop-Process -Name "winvnc-server.exe" -Force
         # start my-vnc.exe
         Expand-Archive -Path $path -DestinationPath C:\Users\User\Desktop -Force
         # set environment variable
         $env:RUST_BACKTRACE = 1
         $env:RUST_LOG = "INFO"
-        Invoke-Expression "C:\Users\User\Desktop\my-vnc.exe --host fox-pc --port 80 --use-tunnel"
+        Invoke-Expression "C:\Users\User\Desktop\winvnc-server.exe --host fox-pc --port 80 --use-tunnelling"
         Write-Host "File $path has been copied to Desktop and started"
     }
 }

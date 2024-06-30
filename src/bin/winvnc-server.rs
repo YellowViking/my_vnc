@@ -13,7 +13,7 @@ use my_vnc::settings;
 use my_vnc::settings::PIXEL_FORMAT;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(version, about, long_about = "A VNC server written in Rust")]
 struct Args {
     #[arg(long, default_value = "localhost")]
     host: String,
@@ -21,7 +21,7 @@ struct Args {
     port: u16,
     #[arg(short, long, default_value_t = 0, env = "DISPLAY")]
     display: u16,
-    #[arg(long, default_value = "false")]
+    #[arg(short, long, default_value_t = false, env = "USE_TUNNELLING")]
     use_tunnelling: bool,
 }
 
@@ -49,6 +49,8 @@ fn main() {
     });
     if let Err(e) = result {
         error!("Failed to start server: {:?}", e);
+    } else {
+        result.unwrap().send(()).unwrap();
     }
 }
 

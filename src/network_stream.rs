@@ -59,21 +59,23 @@ impl Write for TunneledTcpStream {
 pub struct CloneableTunneledTcpStream {
     tunneled_tcp_stream: Arc<Mutex<TunneledTcpStream>>,
     traffic_sender: Sender<()>,
+    notified: bool,
 }
 
 impl CloneableTunneledTcpStream {
     fn new(tunnel_host: &str, sender: Sender<()>) -> anyhow::Result<CloneableTunneledTcpStream> {
         let tunneled_tcp_stream = Arc::new(Mutex::new(TunneledTcpStream::new(tunnel_host)?));
-        Ok(CloneableTunneledTcpStream { tunneled_tcp_stream, traffic_sender: sender })
+        Ok(CloneableTunneledTcpStream { tunneled_tcp_stream, traffic_sender: sender, notified: false })
     }
 }
 
 impl Read for CloneableTunneledTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let result = self.tunneled_tcp_stream.lock().unwrap().read(buf);
-        if result.is_ok() {
-            info!("traffic received - notify");
+        if !self.notified {
             self.traffic_sender.send(()).unwrap();
+            self.notified = true;
+            info!("notified");
         }
         result
     }
@@ -96,6 +98,7 @@ impl TryClone for CloneableTunneledTcpStream {
         Ok(CloneableTunneledTcpStream {
             tunneled_tcp_stream: self.tunneled_tcp_stream.clone(),
             traffic_sender: self.traffic_sender.clone(),
+            notified: true,
         })
     }
 }
@@ -104,7 +107,7 @@ pub trait BoxTryClone {
 }
 impl<T> BoxTryClone for T
 where
-    T: TryClone + 'static + CloneableStream,
+    T: 'static + CloneableStream,
 {
     fn box_try_clone(&self) -> anyhow::Result<Box<dyn CloneableStream>> {
         Ok(Box::new(self.try_clone()?))
@@ -133,10 +136,10 @@ impl TryClone for Box<dyn CloneableStream> {
     }
 }
 
-pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl FnMut(Box<dyn CloneableStream>)) -> anyhow::Result<()> {
+pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl FnMut(Box<dyn CloneableStream>)) -> anyhow::Result<(Sender<()>)> {
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
     if use_tunnelling {
         let tunnel_host = format!("ws://{}", bind);
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
         loop {
             let tunneled_tcp_stream = CloneableTunneledTcpStream::new(&tunnel_host, tx.clone())?;
             on_stream(Box::new(tunneled_tcp_stream));
@@ -149,5 +152,5 @@ pub fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl
             on_stream(Box::new(tcp_stream));
         }
     }
-    Ok(())
+    Ok(tx.clone())
 }
