@@ -10,7 +10,7 @@ use std::thread::sleep;
 use anyhow::bail;
 use bytesize::ByteSize;
 use flate2::write::ZlibEncoder;
-use log::{debug, error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 use rust_vnc::protocol::{Message, S2C};
 use rust_vnc::protocol;
 use windows::Win32::Foundation;
@@ -20,7 +20,7 @@ use windows::Win32::Graphics::Gdi::{BITMAP, GetBitmapBits, GetObjectW, GetSysCol
 use windows::Win32::UI::WindowsAndMessaging::{CURSORINFO, GetCursorInfo, GetCursorPos, GetIconInfo, ICONINFO};
 
 use crate::dxgl::DisplayDuplWrapper;
-use crate::network_stream::CloneableStream;
+use crate::network_stream::VncStream;
 use crate::server_state::ServerState;
 
 pub struct ServerConnection<'a>
@@ -33,7 +33,7 @@ pub struct ServerConnection<'a>
 }
 
 struct MonitoredTcpStream<'a> {
-    tcp_stream: Box<dyn CloneableStream>,
+    tcp_stream: Box<dyn VncStream>,
     server_state: &'a ServerState,
 }
 
@@ -52,7 +52,7 @@ impl<'a> Write for MonitoredTcpStream<'a> {
 }
 
 impl<'a> MonitoredTcpStream<'a> {
-    fn new(tcp_stream: Box<dyn CloneableStream>, server_state: &'a ServerState) -> Self {
+    fn new(tcp_stream: Box<dyn VncStream>, server_state: &'a ServerState) -> Self {
         MonitoredTcpStream {
             tcp_stream,
             server_state,
@@ -61,7 +61,7 @@ impl<'a> MonitoredTcpStream<'a> {
 }
 
 impl<'a> ServerConnection<'a> {
-    pub fn new(tcp_stream: Box<dyn CloneableStream>, server_state: &'a ServerState, display_dupl_wrapper: &'a mut DisplayDuplWrapper) -> Self {
+    pub fn new(tcp_stream: Box<dyn VncStream>, server_state: &'a ServerState, display_dupl_wrapper: &'a mut DisplayDuplWrapper) -> Self {
         let pic_data: Vec<u8> = vec![0; 0];
         let tcp_stream = MonitoredTcpStream::new(tcp_stream, server_state);
         ServerConnection {
@@ -174,6 +174,7 @@ impl<'a> ServerConnection<'a> {
         let pixel_byte_size = 4i32;
         debug!("frame acquired: {} bytes dimensions: {:?}", self.pic_data.len(), self.display_dupl_wrapper.get_dimensions()?);
         let mut rects = { self.display_dupl_wrapper.get_dirty_rects() };
+        trace!("sending {} rects", rects.len());
         let full_rect = vec![Foundation::RECT {
             left: 0,
             top: 0,
@@ -188,8 +189,7 @@ impl<'a> ServerConnection<'a> {
             count: rects.len() as u16,
         };
         message.write_to(&mut self.tcp_stream)?;
-        let line_size = (self.display_dupl_wrapper.get_dimensions()?.0 as i32 * pixel_byte_size) as i32;
-
+        let line_size = self.display_dupl_wrapper.get_dimensions()?.0 as i32 * pixel_byte_size;
         for rect in rects {
             let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
             let mut pixel_buf = Vec::with_capacity((width * height * pixel_byte_size) as usize + size_of::<protocol::Rectangle>());
@@ -209,7 +209,7 @@ impl<'a> ServerConnection<'a> {
             self.tcp_stream.write_all(&self.encode_rect(vnc_rect, pixel_buf)?)?;
         }
         self.tcp_stream.flush()?;
-
+        trace!("frame sent for rects: {:?}", rects.len());
         Ok(())
     }
 

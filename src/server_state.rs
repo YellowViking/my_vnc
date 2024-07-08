@@ -11,6 +11,12 @@ pub enum ConnectionState {
     Terminating = 1,
 }
 
+impl Default for ServerState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ServerState {
     pub fn new() -> Self {
         ServerState {
@@ -67,7 +73,7 @@ impl ServerState {
     }
 
     pub fn get_last_pointer_input<T>(&self, cb: impl FnOnce(&protocol::C2S) -> T) -> T {
-        cb(&*self.last_pointer_input.read().unwrap())
+        cb(&self.last_pointer_input.read().unwrap())
     }
 
     pub fn set_last_key_input(&self, key: u32, down: bool) {
@@ -100,7 +106,7 @@ impl ServerState {
         if let Ok(val) = val {
             *guard = val;
         }
-        return ret;
+        ret
     }
 
     pub fn get_frame_encoding(&self) -> Encoding {

@@ -3,7 +3,7 @@ use std::ops::DerefMut;
 use std::sync::{Arc, Mutex, RwLock};
 
 use lazy_static::lazy_static;
-use log::{debug, error, info, trace};
+use tracing::{debug, error, info, trace};
 use windows::core::Interface;
 use windows::Win32::Foundation;
 use windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Device4, ID3D11Texture2D};
@@ -37,7 +37,7 @@ impl DisplayDuplWrapper {
                 info!("d3d_tex_desc: {:?}", d3d_tex_desc);
                 let mut id3d11texture2d = None;
                 dev.CreateTexture2D(&d3d_tex_desc, None, Some(&mut id3d11texture2d))?; // clone texture
-                if let None = id3d11texture2d {
+                if id3d11texture2d.is_none() {
                     anyhow::bail!("Failed to create texture");
                 }
                 Ok(DisplayDuplWrapper {
@@ -66,8 +66,8 @@ impl DisplayDuplWrapper {
     pub fn draw_to_texture(&mut self, draw_action: impl Fn(HDC) -> anyhow::Result<Foundation::RECT>) -> anyhow::Result<()> {
         unsafe {
             let surface: IDXGISurface1 = self.id3d11texture2d.cast()?;
-            let hdc: HDC;
-            hdc = surface.GetDC(false)?;
+            
+            let hdc: HDC = surface.GetDC(false)?;
             let dirty = draw_action(hdc)?;
             surface.ReleaseDC(None)?;
             self.dirty_rects.push(dirty);
@@ -123,20 +123,20 @@ fn get_display_dimensions(display: u16) -> anyhow::Result<(u16, u16)> {
     })
 }
 
-fn get_display_dupl<T>(display: u16, mut action: impl FnMut(&mut DisplayDupl) -> anyhow::Result<T>) -> anyhow::Result<T>
+fn get_display_dupl<T>(display_index: u16, mut action: impl FnMut(&mut DisplayDupl) -> anyhow::Result<T>) -> anyhow::Result<T>
 {
     {
         let mut guard = DISPLAY_MAP.lock().unwrap();
-        let entry = guard.entry(display);
+        let entry = guard.entry(display_index);
         let display_dupl = entry.or_insert_with(|| {
-            let dupl = init_dxgl_inner(display);
+            let dupl = init_dxgl_inner(display_index);
             let arc = Arc::new(RwLock::new(dupl));
             let arc_clone = arc.clone();
             std::thread::spawn(move || {
-                info!("frame_reader_thread started for display {}", display);
+                info!("frame_reader_thread started for display {}", display_index);
                 display_duplicate_loop(arc_clone);
             });
-            return arc;
+            arc
         });
         let result = display_dupl.write();
         match result {
@@ -185,8 +185,8 @@ fn process_frame(display_dupl: &mut DisplayDupl) -> anyhow::Result<()> {
 }
 
 
-fn init_dxgl_inner(display: u16) -> DisplayDupl {
-    info!("init_dxgl for display {}", display);
+fn init_dxgl_inner(display_index: u16) -> DisplayDupl {
+    info!("init_dxgl for display {}", display_index);
 
     // this is required to be able to use desktop duplication api
     set_process_dpi_awareness();
@@ -194,7 +194,7 @@ fn init_dxgl_inner(display: u16) -> DisplayDupl {
 
     // select gpu and output you want to use.
     let adapter = AdapterFactory::new().get_adapter_by_idx(0).unwrap();
-    let display_output = adapter.get_display_by_idx(display as u32).unwrap();
+    let display_output = adapter.get_display_by_idx(display_index as u32).unwrap();
 
     // get output duplication api
     let mut dupl = DesktopDuplicationApi::new(adapter, display_output.clone()).unwrap();

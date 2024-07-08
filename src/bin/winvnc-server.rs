@@ -1,11 +1,11 @@
 use std::thread;
 
 use clap::Parser;
-use log::{debug, error, info, trace};
+use tracing::{debug, error, info, Instrument, trace};
 use rust_vnc::{Error, protocol};
 use rust_vnc::protocol::{C2S, ClientInit, Encoding, Message};
 use my_vnc::dxgl::DisplayDuplWrapper;
-use my_vnc::network_stream::{CloneableStream, stream_factory_loop, TryClone};
+use my_vnc::network_stream::{stream_factory_loop, TryClone, VncStream};
 use my_vnc::server_connection::ServerConnection;
 use my_vnc::server_events::input;
 use my_vnc::server_state::ServerState;
@@ -25,7 +25,9 @@ struct Args {
     use_tunnelling: bool,
 }
 
-fn main() {
+#[tokio::main(flavor = "multi_thread")]
+#[tracing::instrument(level = "info")]
+async fn main() {
     let args = Args::parse();
     println!("init logger for server Cargo version: {}", env!("CARGO_PKG_VERSION"));
     settings::init_logger();
@@ -34,9 +36,10 @@ fn main() {
     let bind = format!("{}:{}", args.host, args.port);
     let mut connection_id = 0;
     let result = stream_factory_loop(bind.as_str(), args.use_tunnelling, |stream| {
-        thread::spawn(move || {
+        let span = tracing::span!(tracing::Level::INFO, "connection", %connection_id);
+        connection_id += 1;
+        tokio::spawn(async move {
             info!("Connection established! {}", connection_id);
-            connection_id += 1;
             match handle_client(stream, args.display) {
                 Ok(_) => {
                     info!("Connection {} closed", connection_id);
@@ -45,36 +48,37 @@ fn main() {
                     info!("Connection {} closed with error: {:?}", connection_id, e);
                 }
             }
-        });
-    });
+        }.instrument(span));
+    }).await;
     if let Err(e) = result {
         error!("Failed to start server: {:?}", e);
     } else {
-        result.unwrap().send(()).unwrap();
+        info!("Server terminated");
     }
 }
 
-fn handle_client(mut tcp_stream: Box<dyn CloneableStream>, display: u16) -> anyhow::Result<()> {
+#[tracing::instrument(level = "info", skip_all)]
+fn handle_client(mut vnc_stream: Box<dyn VncStream>, display: u16) -> anyhow::Result<()> {
     let version = protocol::Version::Rfb38;
     info!("server version: {:?}", version);
-    version.write_to(&mut tcp_stream)?;
-    let client_version = protocol::Version::read_from(&mut tcp_stream)?;
+    version.write_to(&mut vnc_stream)?;
+    let client_version = protocol::Version::read_from(&mut vnc_stream)?;
     if client_version != version {
         anyhow::bail!("client version: {:?}", client_version);
     }
     info!("client version: {:?}", client_version);
-    protocol::SecurityTypes(vec![protocol::SecurityType::None]).write_to(&mut tcp_stream)?;
+    protocol::SecurityTypes(vec![protocol::SecurityType::None]).write_to(&mut vnc_stream)?;
 
-    let client_security_type = protocol::SecurityType::read_from(&mut tcp_stream)?;
+    let client_security_type = protocol::SecurityType::read_from(&mut vnc_stream)?;
     if client_security_type != protocol::SecurityType::None {
         error!("client security type: {:?}", client_security_type);
         anyhow::bail!("client security type: {:?}", client_security_type);
     }
     info!("client security type: {:?}", client_security_type);
 
-    protocol::SecurityResult::Succeeded.write_to(&mut tcp_stream)?;
+    protocol::SecurityResult::Succeeded.write_to(&mut vnc_stream)?;
 
-    let client_init: ClientInit = protocol::ClientInit::read_from(&mut tcp_stream)?;
+    let client_init: ClientInit = protocol::ClientInit::read_from(&mut vnc_stream)?;
     info!("client init: {:?}", client_init);
     let mut display_duplicator = DisplayDuplWrapper::new(display)?;
     let (framebuffer_width, framebuffer_height) = display_duplicator.get_dimensions()?;
@@ -85,24 +89,28 @@ fn handle_client(mut tcp_stream: Box<dyn CloneableStream>, display: u16) -> anyh
         pixel_format: PIXEL_FORMAT,
         name: "rust-vnc".to_string(),
     };
-    server_init.write_to(&mut tcp_stream)?;
-    let tcp_stream_copy = tcp_stream.try_clone()?;
+    server_init.write_to(&mut vnc_stream)?;
+    let tcp_stream_copy = vnc_stream.try_clone()?;
     let server_state = ServerState::new();
     thread::scope(|s| -> anyhow::Result<()>
     {
         let mut server_connection =
             ServerConnection::new(tcp_stream_copy, &server_state, &mut display_duplicator);
+        let span = tracing::span!(tracing::Level::INFO, "server_loop");
+        
         s.spawn(move || {
-            let result = server_connection.update_frame_loop();
-            if let Err(e) = result {
-                if let Some(Error::Disconnected) = e.downcast_ref() {
-                    info!("client disconnected");
-                } else {
-                    error!("Failed to update frame: {:?}", e);
+            span.in_scope(|| {
+                let result = server_connection.update_frame_loop();
+                if let Err(e) = result {
+                    if let Some(Error::Disconnected) = e.downcast_ref() {
+                        info!("client disconnected");
+                    } else {
+                        error!("Failed to update frame: {:?}", e);
+                    }
                 }
-            }
+            });
         });
-        let loop_result = server_loop(tcp_stream, &server_state);
+        let loop_result = server_loop(vnc_stream, &server_state);
         if let Err(e) = loop_result {
             error!("Failed to handle message: {:?}", e);
         }
@@ -112,7 +120,8 @@ fn handle_client(mut tcp_stream: Box<dyn CloneableStream>, display: u16) -> anyh
     Ok(())
 }
 
-fn server_loop(mut tcp_stream: Box<dyn CloneableStream>, server_state: &ServerState) -> anyhow::Result<()> {
+#[tracing::instrument(level = "info", skip_all)]
+fn server_loop(mut tcp_stream: Box<dyn VncStream>, server_state: &ServerState) -> anyhow::Result<()> {
     loop {
         let message_result: rust_vnc::Result<C2S> = C2S::read_from(&mut tcp_stream);
         if let Err(Error::Disconnected) = message_result {
