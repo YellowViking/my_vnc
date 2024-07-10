@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, AtomicIsize, AtomicUsize};
 use std::sync::RwLock;
+
 use rust_vnc::protocol;
 use rust_vnc::protocol::{ButtonMaskFlags, Encoding};
-use std::collections::HashMap;
 use windows::Win32::Foundation;
 
 pub enum ConnectionState {
@@ -41,23 +42,34 @@ impl ServerState {
     }
 
     pub fn get_ready(&self) -> bool {
-        self.connection_state.load(std::sync::atomic::Ordering::Relaxed) == ConnectionState::Ready as i32
+        self.connection_state
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == ConnectionState::Ready as i32
     }
 
     pub fn get_terminating(&self) -> bool {
-        self.connection_state.load(std::sync::atomic::Ordering::Relaxed) == ConnectionState::Terminating as i32
+        self.connection_state
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == ConnectionState::Terminating as i32
     }
 
     pub fn set_ready(&self) {
-        self.connection_state.store(ConnectionState::Ready as i32, std::sync::atomic::Ordering::Relaxed);
+        self.connection_state.store(
+            ConnectionState::Ready as i32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub fn set_terminating(&self) {
-        self.connection_state.store(ConnectionState::Terminating as i32, std::sync::atomic::Ordering::Relaxed);
+        self.connection_state.store(
+            ConnectionState::Terminating as i32,
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub fn inc_frame(&self) {
-        self.frame.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.frame
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn get_cursor_sent(&self) -> isize {
@@ -65,7 +77,8 @@ impl ServerState {
     }
 
     pub fn set_cursor_sent(&self, hcursor: isize) {
-        self.cursor_sent.store(hcursor, std::sync::atomic::Ordering::Relaxed);
+        self.cursor_sent
+            .store(hcursor, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn set_last_pointer_input(&self, input: protocol::C2S) {
@@ -81,24 +94,31 @@ impl ServerState {
     }
 
     pub fn get_last_key_input(&self, key: u32) -> bool {
-        self.last_key_input.read().unwrap().get(&key).copied().unwrap_or(false)
+        self.last_key_input
+            .read()
+            .unwrap()
+            .get(&key)
+            .copied()
+            .unwrap_or(false)
     }
 
     pub fn add_bytes_send(&self, bytes: usize) {
-        self.bytes_send.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        self.bytes_send
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn get_bytes_send(&self) -> usize {
         self.bytes_send.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn get_and_set_last_clipboard(&self, cb: impl FnOnce(&str) -> anyhow::Result<String>) -> anyhow::Result<()> {
+    pub fn get_and_set_last_clipboard(
+        &self,
+        cb: impl FnOnce(&str) -> anyhow::Result<String>,
+    ) -> anyhow::Result<()> {
         let mut guard = self.last_clipboard.write().unwrap();
         let val = cb(guard.as_str());
         let ret = match val {
-            Ok(_) => {
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(e) => {
                 anyhow::bail!(e)
             }
@@ -110,11 +130,14 @@ impl ServerState {
     }
 
     pub fn get_frame_encoding(&self) -> Encoding {
-        self.frame_encoding.load(std::sync::atomic::Ordering::Relaxed).into()
+        self.frame_encoding
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .into()
     }
 
     pub fn set_frame_encoding(&self, encoding: Encoding) {
-        self.frame_encoding.store(encoding.into(), std::sync::atomic::Ordering::Relaxed);
+        self.frame_encoding
+            .store(encoding.into(), std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn get_last_stats_size(&self) -> Foundation::SIZE {

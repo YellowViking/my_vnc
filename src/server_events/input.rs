@@ -1,23 +1,41 @@
 use std::mem::size_of;
 use std::ops::BitXor;
-use clipboard_win::set_clipboard_string;
 
-use tracing::{error, info, trace, warn};
+use clipboard_win::set_clipboard_string;
 use rust_vnc::protocol::{ButtonMaskFlags, C2S};
+use tracing::{error, info, trace, warn};
+use win_key_codes;
 use windows::Win32::Foundation::GetLastError;
-use windows::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, SendInput, VIRTUAL_KEY, VkKeyScanA};
-use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, VkKeyScanA, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+    MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+    MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+};
 use xkeysym;
 use xkeysym::{key, Keysym};
-use win_key_codes;
 
 use crate::server_state::ServerState;
 
 pub fn handle_pointer_event(server_state: &ServerState, message: C2S) {
-    if let C2S::PointerEvent { x_position, y_position, button_mask } = message {
-        let input = server_state.get_last_pointer_input(|last_input| -> Option<INPUT>  {
+    if let C2S::PointerEvent {
+        x_position,
+        y_position,
+        button_mask,
+    } = message
+    {
+        let input = server_state.get_last_pointer_input(|last_input| -> Option<INPUT> {
             unsafe {
-                if let C2S::PointerEvent { button_mask: last_button_mask, x_position: _last_x_position, y_position: _last_y_position } = last_input {
+                if let C2S::PointerEvent {
+                    button_mask: last_button_mask,
+                    x_position: _last_x_position,
+                    y_position: _last_y_position,
+                } = last_input
+                {
                     if *last_input == message {
                         return None;
                     }
@@ -175,7 +193,11 @@ pub fn handle_key_event(down: bool, key: u32, get_last_key_input: impl Fn(u32) -
         }
 
         let mut scan = 0;
-        let mut dw_flags = if down { KEYBD_EVENT_FLAGS(0) } else { KEYEVENTF_KEYUP };
+        let mut dw_flags = if down {
+            KEYBD_EVENT_FLAGS(0)
+        } else {
+            KEYEVENTF_KEYUP
+        };
         if w_vk.0 == 0 {
             dw_flags |= KEYEVENTF_UNICODE;
             info!("key event: unicode: 0x{:X}", c as u16);
@@ -195,7 +217,9 @@ pub fn handle_key_event(down: bool, key: u32, get_last_key_input: impl Fn(u32) -
             },
         }
     };
-    unsafe { info!("key event: {:?}", input.Anonymous.ki); }
+    unsafe {
+        info!("key event: {:?}", input.Anonymous.ki);
+    }
     let input_array = [input];
     let send_input = unsafe { SendInput(&input_array, size_of::<INPUT>() as i32) };
     unsafe {

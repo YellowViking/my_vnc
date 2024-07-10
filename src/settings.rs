@@ -1,5 +1,8 @@
-use tracing::{Event, info};
+use tracing::{info, Event};
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormattedFields};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 pub const PIXEL_FORMAT: rust_vnc::PixelFormat = rust_vnc::PixelFormat {
     bits_per_pixel: 32,
@@ -20,9 +23,21 @@ where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
     N: for<'a> tracing_subscriber::fmt::FormatFields<'a> + 'static,
 {
-    fn format_event(&self, ctx: &FmtContext<'_, S, N>, mut writer: tracing_subscriber::fmt::format::Writer<'_>, event: &Event<'_>) -> std::fmt::Result {
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: tracing_subscriber::fmt::format::Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
         let metadata = event.metadata();
-        write!(&mut writer, "{}:{} {} [{}] - ", metadata.file().unwrap_or("unknown"), metadata.line().unwrap_or(0), chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"), metadata.level())?;
+        write!(
+            &mut writer,
+            "{}:{} {} [{}] - ",
+            metadata.file().unwrap_or("unknown"),
+            metadata.line().unwrap_or(0),
+            chrono::Local::now().format("%Y-%m-%dT%H:%M:%S"),
+            metadata.level()
+        )?;
         if let Some(scope) = ctx.event_scope() {
             for span in scope.from_root() {
                 write!(&mut writer, "{}", span.name())?;
@@ -49,16 +64,34 @@ where
     }
 }
 pub fn init_logger() {
-    tracing_subscriber::fmt()
+    let stdout = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
         .with_timer(tracing_subscriber::fmt::time::time())
         .with_line_number(true)
         .with_file(true)
         .event_format(MyTracingFormatter)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stdout)
+        .with_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .boxed();
+    let file = tracing_subscriber::fmt::layer()
+        .with_writer(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("c:\\shared\\my_vnc.log")
+                .unwrap(),
+        )
+        .with_timer(tracing_subscriber::fmt::time::time())
+        .with_line_number(true)
+        .with_file(true)
+        .event_format(MyTracingFormatter)
+        .with_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .boxed();
+    tracing_subscriber::registry()
+        .with(stdout)
+        .with(file)
         .init();
     info!("logger initialized");
-    
+
     // env_logger::Builder::from_default_env()
     //     .format(|buf, record| {
     //         writeln!(

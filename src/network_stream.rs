@@ -2,19 +2,20 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
 use std::io::{Error, Read, Write};
-use std::pin::{Pin};
+use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, ready};
-use tracing::{info, trace, warn};
+use std::task::{ready, Context, Poll};
+
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, Stream, StreamExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio_tungstenite::{MaybeTlsStream, tungstenite};
-use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
 use tokio_tungstenite::tungstenite::http::Uri;
-use tracing::{instrument};
+use tokio_tungstenite::tungstenite::{ClientRequestBuilder, Message};
+use tokio_tungstenite::{tungstenite, MaybeTlsStream};
+use tracing::instrument;
+use tracing::{info, trace, warn};
 
 type WebSocket = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -33,7 +34,10 @@ impl TunneledTcpStream {
         let (mut sender, mut receiver) = ws_stream.split();
         info!("TunneledTcpStream: waiting for connect message");
         loop {
-            let message = receiver.next().await.ok_or(anyhow::anyhow!("no message"))??;
+            let message = receiver
+                .next()
+                .await
+                .ok_or(anyhow::anyhow!("no message"))??;
             match message {
                 Message::Text(text) => {
                     if text == TUNNEL_CONNECT {
@@ -70,19 +74,27 @@ struct TunneledTcpStreamAsyncRead {
 }
 impl TunneledTcpStreamAsyncRead {
     pub fn new(ws_stream: SplitStream<WebSocket>) -> TunneledTcpStreamAsyncRead {
-        TunneledTcpStreamAsyncRead { buf: VecDeque::new(), ws_stream }
+        TunneledTcpStreamAsyncRead {
+            buf: VecDeque::new(),
+            ws_stream,
+        }
     }
 }
 impl AsyncRead for TunneledTcpStreamAsyncRead {
     #[instrument(level = "trace", skip_all, ret)]
-    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
         let mut ret = Ok(());
         // Check if internal buffer has enough data
         while self.buf.len() < buf.remaining() {
             let ws_stream = Pin::new(&mut self.ws_stream);
             let message = ws_stream.poll_next(cx).map_err(map_to_io_error)?;
             let message = ready!(message);
-            let message = message.ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no message"))?;
+            let message = message
+                .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no message"))?;
             tracing::event!(tracing::Level::TRACE, message_len = message.len(), message_type = ?message);
             match message {
                 Message::Binary(data) => {
@@ -101,7 +113,10 @@ impl AsyncRead for TunneledTcpStreamAsyncRead {
                 }
                 _ => {
                     warn!("TunneledTcpStream: unexpected message: {:?}", message);
-                    ret = Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected message"));
+                    ret = Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected message",
+                    ));
                     break;
                 }
             }
@@ -127,10 +142,16 @@ impl TunneledTcpStreamAsyncWrite {
 
 impl AsyncWrite for TunneledTcpStreamAsyncWrite {
     #[instrument(level = "trace", skip_all, ret, fields(buf_len = buf.len()))]
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
         ready!(self.sink.poll_ready_unpin(cx)).map_err(map_to_io_error)?;
         let message = tungstenite::Message::Binary(Vec::from(buf));
-        self.sink.start_send_unpin(message).map_err(map_to_io_error)?;
+        self.sink
+            .start_send_unpin(message)
+            .map_err(map_to_io_error)?;
         let poll = self.sink.poll_flush_unpin(cx).map_err(map_to_io_error)?;
         if poll.is_pending() {
             cx.waker().wake_by_ref();
@@ -187,8 +208,7 @@ pub trait TryClone {
 }
 
 impl TryClone for Box<dyn VncStream + 'static> {
-    fn try_clone(&self) -> Result<Box<dyn VncStream>, anyhow::Error>
-    {
+    fn try_clone(&self) -> Result<Box<dyn VncStream>, anyhow::Error> {
         self.box_try_clone()
     }
 }
@@ -202,7 +222,7 @@ enum WriterReply {
     Flush(io::Result<()>),
 }
 #[derive(Debug)]
-struct CloneableStream {
+pub struct CloneableStream {
     reader: Arc<Mutex<(SyncSender<usize>, Receiver<io::Result<Vec<u8>>>)>>,
     writer: Arc<Mutex<(SyncSender<WriterMessage>, Receiver<WriterReply>)>>,
 }
@@ -227,7 +247,8 @@ impl CloneableStream {
         R: AsyncWrite + Unpin + Send + 'static,
     {
         let (reader_tx, reader_rx) = std::sync::mpsc::sync_channel::<usize>(1);
-        let (reader_reply_tx, reader_reply_rx) = std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
+        let (reader_reply_tx, reader_reply_rx) =
+            std::sync::mpsc::sync_channel::<io::Result<Vec<u8>>>(1);
         let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel::<WriterMessage>(1);
         let (writer_reply_tx, writer_reply_rx) = std::sync::mpsc::sync_channel::<WriterReply>(1);
         tokio::spawn(async move {
@@ -235,7 +256,9 @@ impl CloneableStream {
                 let size = reader_rx.recv().unwrap();
                 let mut buf = vec![0u8; size];
                 let result = reader.read(&mut buf).await;
-                reader_reply_tx.send(result.map(|bytesize| buf[..bytesize].to_vec())).unwrap();
+                reader_reply_tx
+                    .send(result.map(|bytesize| buf[..bytesize].to_vec()))
+                    .unwrap();
             }
         });
         tokio::spawn(async move {
@@ -253,7 +276,10 @@ impl CloneableStream {
                 }
             }
         });
-        CloneableStream { reader: Arc::new(Mutex::new((reader_tx, reader_reply_rx))), writer: Arc::new(Mutex::new((writer_tx, writer_reply_rx))) }
+        CloneableStream {
+            reader: Arc::new(Mutex::new((reader_tx, reader_reply_rx))),
+            writer: Arc::new(Mutex::new((writer_tx, writer_reply_rx))),
+        }
     }
 }
 
@@ -266,8 +292,21 @@ where
 impl Read for CloneableStream {
     #[instrument(level = "trace", skip(self, buf), fields(buf_len = buf.len()))]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        { self.reader.lock().unwrap().0.send(buf.len()).map_err(map_to_io_error)?; }
-        let ret = self.reader.lock().unwrap().1.recv().map_err(map_to_io_error)??;
+        {
+            self.reader
+                .lock()
+                .unwrap()
+                .0
+                .send(buf.len())
+                .map_err(map_to_io_error)?;
+        }
+        let ret = self
+            .reader
+            .lock()
+            .unwrap()
+            .1
+            .recv()
+            .map_err(map_to_io_error)??;
         let len = ret.len();
         buf[..len].copy_from_slice(&ret);
         Ok(len)
@@ -277,8 +316,22 @@ impl Read for CloneableStream {
 impl Write for CloneableStream {
     #[instrument(level = "trace", skip(self, buf), fields(buf_len = buf.len()))]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        { self.writer.lock().unwrap().0.send(WriterMessage::Write(Vec::from(buf))).map_err(map_to_io_error)?; }
-        match self.writer.lock().unwrap().1.recv().map_err(map_to_io_error)? {
+        {
+            self.writer
+                .lock()
+                .unwrap()
+                .0
+                .send(WriterMessage::Write(Vec::from(buf)))
+                .map_err(map_to_io_error)?;
+        }
+        match self
+            .writer
+            .lock()
+            .unwrap()
+            .1
+            .recv()
+            .map_err(map_to_io_error)?
+        {
             WriterReply::Write(result) => result,
             _ => panic!("unexpected reply"),
         }
@@ -286,8 +339,22 @@ impl Write for CloneableStream {
 
     #[instrument(level = "trace", skip(self))]
     fn flush(&mut self) -> io::Result<()> {
-        { self.writer.lock().unwrap().0.send(WriterMessage::Flush).map_err(map_to_io_error)?; }
-        match self.writer.lock().unwrap().1.recv().map_err(map_to_io_error)? {
+        {
+            self.writer
+                .lock()
+                .unwrap()
+                .0
+                .send(WriterMessage::Flush)
+                .map_err(map_to_io_error)?;
+        }
+        match self
+            .writer
+            .lock()
+            .unwrap()
+            .1
+            .recv()
+            .map_err(map_to_io_error)?
+        {
             WriterReply::Flush(result) => result,
             _ => panic!("unexpected reply"),
         }
@@ -295,7 +362,11 @@ impl Write for CloneableStream {
 }
 
 #[instrument(level = "info", skip_all, fields(bind = bind, use_tunnelling = use_tunnelling))]
-pub async fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream: impl FnMut(Box<dyn VncStream>)) -> anyhow::Result<()> {
+pub async fn stream_factory_loop(
+    bind: &str,
+    use_tunnelling: bool,
+    mut on_stream: impl FnMut(CloneableStream),
+) -> anyhow::Result<()> {
     if use_tunnelling {
         let tunnel_host = format!("ws://{}", bind);
         loop {
@@ -305,8 +376,9 @@ pub async fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream
                 continue;
             }
             let tunneled_tcp_stream = result.unwrap();
-            let stream = CloneableStream::new(tunneled_tcp_stream.ws_reader, tunneled_tcp_stream.ws_writer);
-            on_stream(Box::new(stream));
+            let stream =
+                CloneableStream::new(tunneled_tcp_stream.ws_reader, tunneled_tcp_stream.ws_writer);
+            on_stream(stream);
         }
     } else {
         let tcp_listener = tokio::net::TcpListener::bind(bind).await?;
@@ -315,7 +387,7 @@ pub async fn stream_factory_loop(bind: &str, use_tunnelling: bool, mut on_stream
             info!("Connection established! {:?}", addr);
             let (reader, writer) = socket.into_split();
             let stream = CloneableStream::new(reader, writer);
-            on_stream(Box::new(stream));
+            on_stream(stream);
         }
     }
 }
