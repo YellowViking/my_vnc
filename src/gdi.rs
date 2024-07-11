@@ -84,7 +84,7 @@ impl DisplayDuplicator for GdiDisplayDuplicator {
         })
     }
 
-    #[instrument(level = "info", ret, skip(self))]
+    #[instrument(level = "trace", ret, skip(self))]
     fn copy_from_desktop(&mut self) -> anyhow::Result<()> {
         unsafe {
             let (width, height) = self.get_dimensions()?;

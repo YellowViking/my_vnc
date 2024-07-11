@@ -89,10 +89,16 @@ impl AsyncRead for TunneledTcpStreamAsyncRead {
     ) -> Poll<io::Result<()>> {
         let mut ret = Ok(());
         // Check if internal buffer has enough data
-        while self.buf.len() < buf.remaining() {
+        while self.buf.len() == 0 {
             let ws_stream = Pin::new(&mut self.ws_stream);
             let message = ws_stream.poll_next(cx).map_err(map_to_io_error)?;
-            let message = ready!(message);
+            let message = match message {
+                Poll::Ready(msg) => {msg}
+                Poll::Pending => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+            };
             let message = message
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no message"))?;
             tracing::event!(tracing::Level::TRACE, message_len = message.len(), message_type = ?message);
