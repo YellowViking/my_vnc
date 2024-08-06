@@ -2,21 +2,20 @@ use log::trace;
 use tracing::{info, instrument};
 use crate::traits::DisplayDuplicator;
 use windows::Win32::Foundation;
-use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{BITMAPINFO, GetDC, HBITMAP, HDC};
 use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
 
-struct MY_HDC(HDC);
-struct MY_HBITMAP(HBITMAP);
-unsafe impl Send for MY_HDC {}
-unsafe impl Send for MY_HBITMAP {}
+struct MyHdc(HDC);
+struct MyHbitmap(HBITMAP);
+unsafe impl Send for MyHdc {}
+unsafe impl Send for MyHbitmap {}
 pub(crate) struct GdiDisplayDuplicator {
     #[warn(dead_code)]
     display: u16,
     dirty_rects: Vec<Foundation::RECT>,
-    hdc_bitmap: MY_HDC,
-    hdc_screen: MY_HDC,
-    hbitmap: MY_HBITMAP,
+    hdc_bitmap: MyHdc,
+    hdc_screen: MyHdc,
+    hbitmap: MyHbitmap,
     vec: Vec<u8>,
 }
 
@@ -38,7 +37,6 @@ impl DisplayDuplicator for GdiDisplayDuplicator {
 
     fn new(display: u16) -> anyhow::Result<Self> {
         // Initialize GDI and create a new instance
-        let hdc = unsafe { GetDC(HWND::default()) };
         let width = unsafe { GetSystemMetrics(SM_CXSCREEN) };
         let height = unsafe { GetSystemMetrics(SM_CYSCREEN) };
         let buf_size = width as usize * height as usize * 4;
@@ -78,14 +76,15 @@ impl DisplayDuplicator for GdiDisplayDuplicator {
             display,
             dirty_rects: Vec::new(),
             vec: vec![0u8; buf_size],
-            hdc_bitmap: MY_HDC(hdc_target),
-            hdc_screen: MY_HDC(hdc_screen),
-            hbitmap: MY_HBITMAP(hbitmap),
+            hdc_bitmap: MyHdc(hdc_target),
+            hdc_screen: MyHdc(hdc_screen),
+            hbitmap: MyHbitmap(hbitmap),
         })
     }
 
     #[instrument(level = "trace", ret, skip(self))]
     fn copy_from_desktop(&mut self) -> anyhow::Result<()> {
+        puffin::profile_function!();
         unsafe {
             let (width, height) = self.get_dimensions()?;
             let hdc_target = self.hdc_bitmap.0;
@@ -109,6 +108,7 @@ impl DisplayDuplicator for GdiDisplayDuplicator {
         &mut self,
         draw_action: impl Fn(HDC) -> anyhow::Result<Foundation::RECT>,
     ) -> anyhow::Result<()> {
+        puffin::profile_function!();
         draw_action(self.hdc_bitmap.0)?;
         let mut vec = self.copy_desktop_to_buf()?;
         // compute dirty rects between vec and self.vec line by line
@@ -172,6 +172,7 @@ impl GdiDisplayDuplicator {
     }
 
     fn copy_desktop_to_buf(&mut self) -> anyhow::Result<Vec<u8>> {
+        puffin::profile_function!();
         let (width, height) = self.get_dimensions()?;
         let hdc_target = self.hdc_bitmap.0;
 

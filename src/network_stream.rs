@@ -102,6 +102,7 @@ impl AsyncRead for TunneledTcpStreamAsyncRead {
             let message = message
                 .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no message"))?;
             tracing::event!(tracing::Level::TRACE, message_len = message.len(), message_type = ?message);
+            puffin::profile_function!();
             match message {
                 Message::Binary(data) => {
                     tracing::event!(tracing::Level::TRACE, data_len = data.len());
@@ -137,6 +138,7 @@ impl AsyncRead for TunneledTcpStreamAsyncRead {
 #[derive(Debug)]
 struct TunneledTcpStreamAsyncWrite {
     sink: SplitSink<WebSocket, tungstenite::Message>,
+    #[allow(dead_code)]
     seq: u32,
 }
 
@@ -153,6 +155,7 @@ impl AsyncWrite for TunneledTcpStreamAsyncWrite {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        puffin::profile_function!();
         ready!(self.sink.poll_ready_unpin(cx)).map_err(map_to_io_error)?;
         let message = tungstenite::Message::Binary(Vec::from(buf));
         self.sink

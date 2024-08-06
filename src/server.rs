@@ -6,7 +6,7 @@ use rust_vnc::{protocol, Error};
 use tracing::{debug, error, info, trace, Instrument};
 
 use crate::dxgl::D3DDisplayDuplicator;
-use crate::gdi;
+use crate::gdi::GdiDisplayDuplicator;
 use crate::network_stream::{stream_factory_loop, CloneableStream, TryClone};
 use crate::server_connection::ServerConnection;
 use crate::server_events::input;
@@ -31,17 +31,29 @@ pub struct Args {
 
 pub async fn main_args(args: Args, bind: String) {
     let mut connection_id = 0;
+    let server_addr = format!("0.0.0.0:{}", puffin_http::DEFAULT_PORT);
+    let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
+    eprintln!("Serving demo profile data on {server_addr}. Run `puffin_viewer` to view it.");
+    puffin::set_scopes_on(true);
     let result = stream_factory_loop(bind.as_str(), args.use_tunnelling, |stream| {
         let span = tracing::span!(tracing::Level::INFO, "connection", %connection_id);
         connection_id += 1;
+        tokio::spawn(async move {
+            loop {
+                puffin::GlobalProfiler::lock().new_frame();
+                tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+            }
+        });
+        
         tokio::spawn(
             async move {
+                puffin::set_scopes_on(true);
                 info!("Connection established! {}", connection_id);
                 let client = if args.use_gdi {
                     info!("Using GDI");
-                    handle_client::<gdi::GdiDisplayDuplicator>(stream, args.display)
+                    handle_client(stream, GdiDisplayDuplicator::new(args.display).unwrap())
                 } else {
-                    handle_client::<D3DDisplayDuplicator>(stream, args.display)
+                    handle_client(stream, D3DDisplayDuplicator::new(args.display).unwrap())
                 };
                 match client {
                     Ok(_) => {
@@ -51,11 +63,9 @@ pub async fn main_args(args: Args, bind: String) {
                         info!("Connection {} closed with error: {:?}", connection_id, e);
                     }
                 }
-            }
-                .instrument(span),
+            }.instrument(span),
         );
-    })
-        .await;
+    }).await;
     if let Err(e) = result {
         error!("Failed to start server: {:?}", e);
     } else {
@@ -64,11 +74,10 @@ pub async fn main_args(args: Args, bind: String) {
 }
 
 #[tracing::instrument(level = "info", skip_all)]
-fn handle_client<DD>(
+fn handle_client(
     mut vnc_stream: CloneableStream,
-    display: u16,
+    mut display_duplicator: impl DisplayDuplicator + 'static + Send,
 ) -> anyhow::Result<()> where
-    DD: DisplayDuplicator + 'static + Send,
 {
     let version = protocol::Version::Rfb38;
     info!("server version: {:?}", version);
@@ -91,7 +100,6 @@ fn handle_client<DD>(
 
     let client_init: ClientInit = protocol::ClientInit::read_from(&mut vnc_stream)?;
     info!("client init: {:?}", client_init);
-    let mut display_duplicator: DD = DisplayDuplicator::new(display)?;
     let (framebuffer_width, framebuffer_height) = display_duplicator.get_dimensions()?;
 
     let server_init = protocol::ServerInit {
@@ -104,11 +112,13 @@ fn handle_client<DD>(
     let tcp_stream_copy = vnc_stream.try_clone()?;
     let server_state = ServerState::new();
     thread::scope(|s| -> anyhow::Result<()> {
+        puffin::set_scopes_on(true);
         let mut server_connection =
             ServerConnection::new(tcp_stream_copy, &server_state, &mut display_duplicator);
         let span = tracing::span!(tracing::Level::INFO, "server_loop");
 
         s.spawn(move || {
+            puffin::set_scopes_on(true);
             span.in_scope(|| {
                 let result = server_connection.update_frame_loop();
                 if let Err(e) = result {
@@ -133,6 +143,7 @@ fn handle_client<DD>(
 #[tracing::instrument(level = "info", skip_all)]
 fn server_loop(mut tcp_stream: CloneableStream, server_state: &ServerState) -> anyhow::Result<()> {
     loop {
+        puffin::profile_function!();
         let message_result: rust_vnc::Result<C2S> = C2S::read_from(&mut tcp_stream);
         if let Err(Error::Disconnected) = message_result {
             return Ok(());
@@ -190,5 +201,6 @@ fn server_loop(mut tcp_stream: CloneableStream, server_state: &ServerState) -> a
                     .unwrap_or_else(|e| error!("Failed to paste clipboard: {:?}", e));
             }
         }
+        puffin::GlobalProfiler::lock().new_frame();
     }
 }

@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::ffi::c_void;
@@ -35,7 +34,7 @@ where
     pic_data: Vec<u8>,
     server_state: &'a ServerState,
     display_dupl_wrapper: &'a mut DisplayDupl,
-    zlib_encoder: RefCell<ZlibEncoder<VecDeque<u8>>>,
+    zlib_encoder: ZlibEncoder<VecDeque<u8>>,
 }
 
 struct MonitoredTcpStream<'a> {
@@ -82,10 +81,10 @@ where
             pic_data,
             server_state,
             display_dupl_wrapper,
-            zlib_encoder: RefCell::new(ZlibEncoder::new(
+            zlib_encoder: ZlibEncoder::new(
                 VecDeque::new(),
                 flate2::Compression::best(),
-            )),
+            ),
         }
     }
 
@@ -93,6 +92,7 @@ where
         let duration = std::time::Duration::from_millis(1000 / 10);
         info!("update_frame loop started");
         loop {
+            puffin::profile_function!();
             let span = info_span!("update_frame");
             let _guard = span.enter();
             if self.server_state.get_terminating() {
@@ -116,6 +116,7 @@ where
                 sleep(duration - elapsed);
             }
             self.server_state.inc_frame();
+            puffin::GlobalProfiler::lock().new_frame();
         }
     }
 
@@ -133,6 +134,7 @@ where
     }
 
     fn acquire_frame(&mut self) -> anyhow::Result<()> {
+        puffin::profile_function!();
         // draw frame count on the hdc
         self.display_dupl_wrapper
             .draw_to_texture(|hdc| -> anyhow::Result<Foundation::RECT> {
@@ -206,6 +208,7 @@ where
     }
 
     fn send_frame(&mut self) -> anyhow::Result<()> {
+        puffin::profile_function!();
         let pixel_byte_size = 4i32;
         debug!(
             "frame acquired: {} bytes dimensions: {:?}",
@@ -247,8 +250,10 @@ where
                 pixel_buf.write_all(&self.pic_data[start as usize..end as usize])?
             }
             pixel_buf.flush()?;
+            let encoder = &mut self.zlib_encoder;
+            let buf = Self::encode_rect(&self.server_state, vnc_rect, pixel_buf, encoder)?;
             self.tcp_stream
-                .write_all(&self.encode_rect(vnc_rect, pixel_buf)?)?;
+                .write_all(&buf)?;
         }
         self.tcp_stream.flush()?;
         trace!("frame sent for rects: {:?}", rects.len());
@@ -335,11 +340,13 @@ where
         };
         Ok(())
     }
-    fn encode_rect(&self, mut rect: protocol::Rectangle, buf: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let mut encoder = self.zlib_encoder.borrow_mut();
+    fn encode_rect<T>(server_state: &ServerState, mut rect: protocol::Rectangle, buf: Vec<u8>, encoder: &mut ZlibEncoder<T>) -> anyhow::Result<Vec<u8>>
+    where
+        T: Write + Read,
+    {
         let buf_len = buf.len();
         let mut ret = Vec::with_capacity(buf_len);
-        if self.server_state.get_frame_encoding()
+        if server_state.get_frame_encoding()
             == protocol::Encoding::Known(protocol::KnownEncoding::Zlib)
         {
             let out = encoder.total_out() as usize;

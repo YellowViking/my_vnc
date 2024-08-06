@@ -44,6 +44,8 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 futures-util = "0.3.30"
 crc32fast = "1.4.2"
 tokio-util = "0.7.11"
+puffin = "0.19.1"
+puffin_http = "0.16.1"
 
 [profile.release]
 lto = false
