@@ -23,18 +23,21 @@ pub struct Args {
     pub port: u16,
     #[arg(short, long, default_value_t = 0, env = "DISPLAY")]
     pub display: u16,
-    #[arg(short, long, default_value_t = false, env = "USE_TUNNELLING")]
+    #[arg(short = 't', long, default_value_t = false, env = "USE_TUNNELLING")]
     pub use_tunnelling: bool,
-    #[arg(short, long, default_value_t = false, env = "USE_GDI")]
+    #[arg(short = 'g', long, default_value_t = false, env = "USE_GDI")]
     pub use_gdi: bool,
+    #[arg(short, long, default_value_t = false, env = "ENABLE_PROFILING")]
+    pub enable_profiling: bool,
 }
 
-pub async fn main_args(args: Args, bind: String) {
+pub async fn main_args(args: Args) {
+    let bind = format!("{}:{}", args.host, args.port);
     let mut connection_id = 0;
     let server_addr = format!("0.0.0.0:{}", puffin_http::DEFAULT_PORT);
     let _puffin_server = puffin_http::Server::new(&server_addr).unwrap();
     eprintln!("Serving demo profile data on {server_addr}. Run `puffin_viewer` to view it.");
-    puffin::set_scopes_on(true);
+    puffin::set_scopes_on(args.enable_profiling);
     let result = stream_factory_loop(bind.as_str(), args.use_tunnelling, |stream| {
         let span = tracing::span!(tracing::Level::INFO, "connection", %connection_id);
         connection_id += 1;
@@ -47,7 +50,7 @@ pub async fn main_args(args: Args, bind: String) {
         
         tokio::spawn(
             async move {
-                puffin::set_scopes_on(true);
+
                 info!("Connection established! {}", connection_id);
                 let client = if args.use_gdi {
                     info!("Using GDI");
@@ -112,13 +115,13 @@ fn handle_client(
     let tcp_stream_copy = vnc_stream.try_clone()?;
     let server_state = ServerState::new();
     thread::scope(|s| -> anyhow::Result<()> {
-        puffin::set_scopes_on(true);
+
         let mut server_connection =
             ServerConnection::new(tcp_stream_copy, &server_state, &mut display_duplicator);
         let span = tracing::span!(tracing::Level::INFO, "server_loop");
 
         s.spawn(move || {
-            puffin::set_scopes_on(true);
+
             span.in_scope(|| {
                 let result = server_connection.update_frame_loop();
                 if let Err(e) = result {

@@ -16,6 +16,5 @@ async fn main() {
     settings::init_logger();
     info!("args: {:?}", args);
 
-    let bind = format!("{}:{}", args.host, args.port);
-    server::main_args(args, bind).await;
+    server::main_args(args).await;
 }

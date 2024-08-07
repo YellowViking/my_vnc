@@ -1,3 +1,4 @@
+use std::ffi::c_char;
 use crate::server::Args;
 use crate::settings::init_logger;
 use tracing::{error};
@@ -42,8 +43,18 @@ extern "system" fn DllMain(dll_module: HINSTANCE, call_reason: u32, _: *mut ()) 
     true
 }
 #[no_mangle]
-pub extern "C" fn PrintUIEntry() {
-    std::thread::spawn(|| {
+pub extern "C" fn PrintUIEntry(
+    msg: *const c_char,
+) {
+    let msg = unsafe { std::ffi::CStr::from_ptr(msg) };
+    let mut host = msg.to_str().unwrap_or("fox-pc");
+    let vec = host.split(":").collect::<Vec<&str>>();
+    let mut port = 80;
+    if vec.len() > 1 {
+        host = vec[0];
+        port = vec[1].parse::<u16>().unwrap_or(80);
+    }
+    std::thread::spawn(move || {
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -53,14 +64,13 @@ pub extern "C" fn PrintUIEntry() {
                 server::main_args(
                     Args {
                         use_tunnelling: true,
-                        host: "fox-pc".to_string(),
-                        port: 80,
+                        host: host.to_string(),
+                        port,
                         display: 0,
                         use_gdi: true,
+                        enable_profiling: true,
                     },
-                    "fox-pc:80".to_string(),
-                )
-                .await;
+                ).await;
                 unsafe {
                     MessageBoxA(
                         None,
