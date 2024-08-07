@@ -1277,7 +1277,7 @@ checksum = "af190c94f2773fdb3729c55b007a722abb5384da03bc0986df4c289bf5567e96"
 
 [[package]]
 name = "win_desktop_duplication"
-version = "0.10.8"
+version = "0.10.11"
 dependencies = [
  "futures",
  "log",

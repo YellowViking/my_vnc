@@ -1,0 +1,6 @@
+[submodule "rust-vnc"]
+    path = rust-vnc
+    url = https://github.com/YellowViking/rust-vnc.git
+[submodule "win_desktop_duplication"]
+    path = win_desktop_duplication
+    url = https://github.com/YellowViking/win_desktop_duplication.git
